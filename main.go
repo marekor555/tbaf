@@ -1,75 +1,21 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
-	"github.com/klauspost/compress/zstd"
-	"io"
 	"log"
 	"os"
-	"path"
-	"path/filepath"
 	"strings"
 )
 
-func addFile(archive *os.File, fileName string) {
-	if strings.HasPrefix(fileName, "/") {
-		fmt.Println("absolute path detected: ", fileName)
-		fmt.Println("if you try to unpack with absolute paths, it might break your system")
-		log.Fatal("ABSOLUTE PATHS ARE NOT ALLOWED")
-	}
-
-	if stat, err := os.Stat(fileName); err != nil || stat.IsDir() {
-		fmt.Println("Adding directory: ", fileName)
-		err = filepath.Walk(fileName, func(path string, info os.FileInfo, err error) error {
-			if path == fileName || info.IsDir() {
-				return nil
-			}
-			addFile(archive, path)
-			return nil
-		})
-		if err != nil {
-			fmt.Println("Failed to walk directory: ", fileName)
-			log.Fatal(err)
+func handleMsg(msg string, err error, cleanup func()) {
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
 		}
-		return
-	}
-
-	file, err := os.Open(fileName)
-	if err != nil {
-		fmt.Println("Failed to open file: ", fileName)
+		fmt.Println(msg, err)
 		log.Fatal(err)
-	}
-	defer file.Close()
-
-	fileStat, err := file.Stat()
-	if err != nil {
-		fmt.Println("Failed to get file stat: ", fileName)
-		log.Fatal(err)
-	}
-
-	fileBuff := make([]byte, fileStat.Size())
-	_, err = file.Read(fileBuff)
-	if err != nil {
-		fmt.Println("Failed to read file: ", fileName)
-		log.Fatal(err)
-	}
-
-	fileNameBuff := make([]byte, 256)
-	fileSizeBuff := make([]byte, 8)
-	binary.BigEndian.PutUint64(fileSizeBuff, uint64(fileStat.Size()))
-	copy(fileNameBuff, fileName)
-
-	fmt.Println("Writing file: ", fileName)
-	fmt.Println("File size: ", fileStat.Size())
-
-	_, err = archive.Write(fileNameBuff)
-	_, err = archive.Write(fileSizeBuff)
-	_, err = archive.Write(fileBuff)
-	if err != nil {
-		fmt.Println("Failed to write file: ", fileName)
-		log.Fatal(err)
+	} else {
+		fmt.Println(msg)
 	}
 }
 
@@ -77,182 +23,73 @@ func main() {
 	mainCmd := os.Args[1]
 	extraArgs := os.Args[2:]
 	switch mainCmd {
+	case "list", "l":
+		files, msg, err := listArchive(extraArgs[0])
+		if err != nil {
+			fmt.Println(msg)
+			log.Fatal(err)
+		}
+		for _, file := range files {
+			fmt.Println(file)
+		}
 	case "build", "b":
 		fmt.Println("building tbaf file...")
-
-		archive, err := os.Create(extraArgs[0])
-		if err != nil {
-			log.Fatal(err)
+		if !strings.HasSuffix(extraArgs[0], ".tbaf") {
+			fmt.Println("First argument should be the name of the archive, not a file to be added, add .tbaf suffix")
+			fmt.Println("Adding .tbaf suffix to be sure...")
+			extraArgs[0] += ".tbaf"
 		}
-		defer archive.Close()
-
-		fmt.Println("Created file, copying files to archive...")
-
-		for _, fileName := range extraArgs[1:] {
-			addFile(archive, fileName)
-		}
-	case "list", "l":
-		archive, err := os.Open(extraArgs[0])
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer archive.Close()
-
-		for {
-			fileNameBuff := make([]byte, 256)
-			_, err = io.ReadFull(archive, fileNameBuff)
-			if err != nil && err == io.EOF {
-				break
-			} else if err != nil {
-				fmt.Println("Failed to read file name")
-				log.Fatal(err)
-			}
-
-			fileSizeBuff := make([]byte, 8)
-			_, err = io.ReadFull(archive, fileSizeBuff)
-			if err != nil {
-				fmt.Println("Failed to read file size")
-				log.Fatal(err)
-			}
-
-			_, err = archive.Seek(int64(binary.BigEndian.Uint64(fileSizeBuff)), io.SeekCurrent)
-			if err != nil {
-				fmt.Println("Failed to seek to next file")
-				log.Fatal(err)
-			}
-
-			fmt.Println(string(fileNameBuff))
-		}
+		buildMsg, err := buildArchive(extraArgs[0], extraArgs[1:])
+		handleMsg(buildMsg, err, nil)
 	case "unpack", "u":
-		fmt.Println("unpacking tbaf file...")
-
-		archive, err := os.Open(extraArgs[0])
-		if err != nil {
-			fmt.Println("Failed to open file: ", extraArgs[0])
-			log.Fatal(err)
-		}
-		defer archive.Close()
-
-		prefix := ""
-		if len(extraArgs) > 1 {
-			prefix = filepath.Clean(extraArgs[1]) + "/"
-		}
-
-		fmt.Println("Opened file, extracting files...")
-
-		for {
-			fileNameBuff := make([]byte, 256)
-			_, err = io.ReadFull(archive, fileNameBuff)
-			if err != nil && err == io.EOF {
-				fmt.Println("Finished reading file")
-				break
-			}
-			if err != nil {
-				fmt.Println("Failed to read file name")
-				log.Fatal(err)
-			}
-
-			fileSizeBuff := make([]byte, 8)
-			_, err = io.ReadFull(archive, fileSizeBuff)
-			if err != nil {
-				fmt.Println("Failed to read file size")
-				log.Fatal(err)
-			}
-
-			fileBuff := make([]byte, binary.BigEndian.Uint64(fileSizeBuff))
-			_, err = io.ReadFull(archive, fileBuff)
-			if err != nil {
-				fmt.Println("Failed to read file")
-				log.Fatal(err)
-			}
-
-			fileNameBuff = bytes.Trim(fileNameBuff, "\x00")
-			filename := path.Join(prefix, string(fileNameBuff))
-
-			fmt.Println("Writing file: ", filename)
-			fmt.Println("File size: ", binary.BigEndian.Uint64(fileSizeBuff))
-
-			err = os.MkdirAll(filepath.Dir(filename), 0744)
-			if err != nil {
-				fmt.Println("Failed to create directory: ", filename)
-				log.Fatal(err)
-			}
-
-			err = os.WriteFile(filename, fileBuff, 0744)
-			if err != nil {
-				fmt.Println("Failed to write file: ", filename)
-				log.Fatal(err)
-			}
-		}
-
-		if prefix == "" {
-			fmt.Println("Finished extracting files")
-		} else {
-			fmt.Println("Finished extracting files to: ", prefix)
-		}
+		unpackMsg, err := unpackArchive(extraArgs[0], extraArgs[1])
+		handleMsg(unpackMsg, err, nil)
 	case "compress", "c":
 		fmt.Println("compressing tbaf file...")
-
-		file, err := os.Open(extraArgs[0])
-		if err != nil {
-			fmt.Println("Failed to open file: ", extraArgs[0])
-			log.Fatal(err)
-		}
-		defer file.Close()
-
-		compFile, err := os.Create(extraArgs[0] + ".zst")
-		if err != nil {
-			fmt.Println("Failed to create compressed file: ", extraArgs[0]+".zst")
-			log.Fatal(err)
-		}
-		defer compFile.Close()
-
-		writer, err := zstd.NewWriter(compFile, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(10)))
-		if err != nil {
-			fmt.Println("Failed to create zstd writer")
-			log.Fatal(err)
-		}
-		defer writer.Close()
-
-		_, err = writer.ReadFrom(file)
-		if err != nil {
-			fmt.Println("Failed to write encrypted file")
-			log.Fatal(err)
-		}
-
-		fmt.Println("Compressed file written to: ", extraArgs[0]+".zst")
+		compressMsg, err := compressArchive(extraArgs[0])
+		handleMsg(compressMsg, err, nil)
 	case "decompress", "d":
 		fmt.Println("decompressing tbaf file...")
-
-		file, err := os.Open(extraArgs[0])
-		if err != nil {
-			fmt.Println("Failed to open file: ", extraArgs[0])
-			log.Fatal(err)
+		decompressMsg, err := decompressArchive(extraArgs[0])
+		handleMsg(decompressMsg, err, nil)
+	case "build-compress", "bc", "cb":
+		cleanup := func() {
+			err := os.Remove(strings.TrimSuffix(extraArgs[0], ".zst"))
+			if err != nil {
+				fmt.Println("Failed to remove archive file")
+				log.Fatal(err)
+			}
 		}
-		defer file.Close()
-
-		newFileName := strings.TrimSuffix(extraArgs[0], ".zst")
-		decompFile, err := os.Create(newFileName)
-		if err != nil {
-			fmt.Println("Failed to create decompressed file: ", newFileName)
-			log.Fatal(err)
+		if !strings.HasSuffix(extraArgs[0], ".tbaf.zst") {
+			fmt.Println("First argument should be the name of the compressed archive, not a file to be added, add .tbaf.zst suffix")
+			fmt.Println("Adding .tbaf.zst suffix to be sure...")
+			extraArgs[0] += ".tbaf.zst"
 		}
-		defer decompFile.Close()
-
-		reader, err := zstd.NewReader(file)
-		if err != nil {
-			fmt.Println("Failed to create zstd reader")
-			log.Fatal(err)
+		fmt.Println("building compressed tbaf file...")
+		buildMsg, err := buildArchive(strings.Trim(extraArgs[0], ".zst"), extraArgs[1:])
+		handleMsg(buildMsg, err, nil)
+		compressMsg, err := compressArchive(strings.Trim(extraArgs[0], ".zst"))
+		handleMsg(compressMsg, err, cleanup)
+		cleanup()
+	case "unpack-decompress", "ud", "du":
+		cleanup := func() {
+			err := os.Remove(strings.TrimSuffix(extraArgs[0], ".zst"))
+			if err != nil {
+				fmt.Println("Failed to remove decompressed file")
+				log.Fatal(err)
+			}
 		}
-		defer reader.Close()
+		fmt.Println("unpacking and decompressing tbaf file...")
+		decompressMsg, err := decompressArchive(extraArgs[0])
+		handleMsg(decompressMsg, err, nil)
 
-		_, err = decompFile.ReadFrom(reader)
-		if err != nil {
-			fmt.Println("Failed to write decompressed file")
-			log.Fatal(err)
+		unPackPrefix := ""
+		if len(extraArgs) > 1 {
+			unPackPrefix = extraArgs[1]
 		}
-
-		fmt.Println("Decompressed file written to: ", newFileName)
+		unpackMsg, err := unpackArchive(strings.TrimSuffix(extraArgs[0], ".zst"), unPackPrefix)
+		handleMsg("check if file has .tbaf.zst extension\n"+unpackMsg, err, cleanup)
+		cleanup()
 	default:
 		fmt.Println("command not found")
 	}
