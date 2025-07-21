@@ -55,6 +55,9 @@ func addFile(archive *os.File, fileName string) (string, error) {
 				}
 			} else {
 				_, err = addFile(archive, path)
+				if err != nil {
+					return fmt.Errorf("failed to add file %s: %w", path, err)
+				}
 			}
 			return err
 		})
@@ -177,6 +180,10 @@ func unpackArchive(name string, prefix string) (string, error) {
 			err = os.MkdirAll(filename, 0744)
 			if err != nil {
 				return "Failed to create empty directory: " + filename, err
+			}
+			_, err = archive.Seek(8, io.SeekCurrent)
+			if err != nil {
+				return "Failed to seek past directory size", err
 			}
 			continue
 		}
