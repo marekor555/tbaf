@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,14 @@ import (
 	"strings"
 )
 
+func isDirEmpty(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
+}
+
 func addFile(archive *os.File, fileName string) (string, error) {
 	if strings.HasPrefix(fileName, "/") {
 		return "Absolute paths are not allowed", fmt.Errorf("absolute path detected: %s", fileName)
@@ -20,10 +29,33 @@ func addFile(archive *os.File, fileName string) (string, error) {
 	if stat, err := os.Stat(fileName); err != nil || stat.IsDir() {
 		fmt.Println("Adding directory: ", fileName)
 		err = filepath.Walk(fileName, func(path string, info os.FileInfo, err error) error {
-			if path == fileName || info.IsDir() {
+			if path == fileName {
 				return nil
 			}
-			_, err = addFile(archive, path)
+			if info.IsDir() {
+				empty, err := isDirEmpty(path)
+				if err != nil {
+					return err
+				}
+				if empty {
+					fmt.Println("Empty directory detected, adding to archive: ", path)
+					fileNameBuff := make([]byte, 256)
+					fileSizeBuff := make([]byte, 8)
+					binary.BigEndian.PutUint64(fileSizeBuff, 0)
+					copy(fileNameBuff, "/DIR/"+path)
+					_, err = archive.Write(fileNameBuff)
+					if err != nil {
+						return err
+					}
+					_, err = archive.Write(fileSizeBuff)
+					if err != nil {
+						return err
+					}
+					return nil
+				}
+			} else {
+				_, err = addFile(archive, path)
+			}
 			return err
 		})
 		if err != nil {
@@ -130,7 +162,7 @@ func unpackArchive(name string, prefix string) (string, error) {
 	for {
 		fileNameBuff := make([]byte, 256)
 		_, err = io.ReadFull(archive, fileNameBuff)
-		if err != nil && err == io.EOF {
+		if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 			fmt.Println("Finished reading file")
 			break
 		}
@@ -138,6 +170,16 @@ func unpackArchive(name string, prefix string) (string, error) {
 			return "Failed to read file name", err
 		}
 
+		fileNameBuff = bytes.Trim(fileNameBuff, "\x00")
+		filename := path.Join(prefix, strings.TrimPrefix(string(fileNameBuff), "/DIR/"))
+		if strings.HasPrefix(string(fileNameBuff), "/DIR/") {
+			fmt.Println("Creating empty directory: ", filename)
+			err = os.MkdirAll(filename, 0744)
+			if err != nil {
+				return "Failed to create empty directory: " + filename, err
+			}
+			continue
+		}
 		fileSizeBuff := make([]byte, 8)
 		_, err = io.ReadFull(archive, fileSizeBuff)
 		if err != nil {
@@ -149,9 +191,6 @@ func unpackArchive(name string, prefix string) (string, error) {
 		if err != nil {
 			return "Failed to read file", err
 		}
-
-		fileNameBuff = bytes.Trim(fileNameBuff, "\x00")
-		filename := path.Join(prefix, string(fileNameBuff))
 
 		fmt.Println("Writing file: ", filename)
 		fmt.Println("File size: ", binary.BigEndian.Uint64(fileSizeBuff))
